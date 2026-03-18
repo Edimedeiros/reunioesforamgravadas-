@@ -1,0 +1,169 @@
+/**
+ * CONFIGURAÇÃO GLOBAL
+ */
+const SPREADSHEET_ID = '1XoSJAZMd5h5EPtragQlk32OpUVNNCfKWxrVvHhH8XLw';
+const CABECALHO = ["Nome da agenda", "Titulo do Evento", "Data do evento na agenda", "Hora do evento", "Evento realizado?", "Anotações Gemini?", "Possui Gravação?"];
+
+/**
+ * CRIA O MENU NA PLANILHA
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('🤖 Automação')
+    .addItem('1. Forçar Teste (Aba Teste)', 'executarTesteManual')
+    .addSeparator()
+    .addItem('2. Realizar Auditoria Real (Mês Inteiro - SOBRESCREVE)', 'executarAuditoriaMensalManual')
+    .addToUi();
+}
+
+/**
+ * TRATAMENTO DE NOMES (Ex: maria.silva | Acessórias -> Maria Silva)
+ */
+function formatarNome(nomeOriginal) {
+  if (!nomeOriginal) return "Sem Nome";
+  let nome = nomeOriginal.split('|')[0].split('@')[0].trim();
+  nome = nome.replace(/\./g, ' ');
+  return nome.toLowerCase().split(' ').map(palavra => {
+    return palavra.charAt(0).toUpperCase() + palavra.slice(1);
+  }).join(' ');
+}
+
+/**
+ * BOTÃO 1: TESTE MANUAL (Sobrescreve a aba 'Teste' com os últimos 3 dias)
+ */
+function executarTesteManual() {
+  const hoje = new Date();
+  const dataInicio = new Date(hoje);
+  dataInicio.setDate(hoje.getDate() - 2); 
+  dataInicio.setHours(0, 0, 0, 0);
+  const dataFim = new Date(hoje);
+  dataFim.setHours(23, 59, 59, 999);
+
+  processarAuditoria(dataInicio, dataFim, "Teste", true);
+  SpreadsheetApp.getUi().alert("Teste concluído! Verifique a aba 'Teste'.");
+}
+
+/**
+ * BOTÃO 2: AUDITORIA REAL MENSAL (Sobrescreve a aba do mês com tudo desde o dia 01)
+ */
+function executarAuditoriaMensalManual() {
+  const hoje = new Date();
+  // Define o dia 01 do mês atual às 00:00:00
+  const dataInicio = new Date(hoje.getFullYear(), hoje.getMonth(), 1, 0, 0, 0);
+  const dataFim = new Date(); // Até o momento atual
+
+  const meses = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+  const nomeAbaMes = meses[hoje.getMonth()] + "_" + hoje.getFullYear();
+
+  const ui = SpreadsheetApp.getUi();
+  const resposta = ui.alert('🚨 ATENÇÃO', 'Isso vai APAGAR todos os dados da aba "' + nomeAbaMes + '" e refazer a busca desde o dia 01/' + (hoje.getMonth()+1) + '. Deseja continuar?', ui.ButtonSet.YES_NO);
+  
+  if (resposta == ui.Button.YES) {
+    processarAuditoria(dataInicio, dataFim, nomeAbaMes, true); // true para sobrescrever tudo
+    ui.alert("Auditoria de " + nomeAbaMes + " atualizada com sucesso!");
+  }
+}
+
+/**
+ * EXECUÇÃO DIÁRIA AUTOMÁTICA (Gatilho para 08:00h - Apenas adiciona o dia anterior)
+ */
+function realizarAuditoriaDiaria() {
+  const hoje = new Date();
+  const ontem = new Date(hoje);
+  ontem.setDate(hoje.getDate() - 1);
+  const dataInicio = new Date(ontem);
+  dataInicio.setHours(0, 0, 0, 0);
+  const dataFim = new Date(ontem);
+  dataFim.setHours(23, 59, 59, 999);
+
+  const meses = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+  const nomeAbaMes = meses[dataInicio.getMonth()] + "_" + dataInicio.getFullYear();
+
+  processarAuditoria(dataInicio, dataFim, nomeAbaMes, false); // false para apenas adicionar no final
+}
+
+/**
+ * MOTOR DA AUTOMAÇÃO
+ */
+function processarAuditoria(dataInicio, dataFim, nomeAbaAlvo, sobrescrever) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(nomeAbaAlvo) || ss.insertSheet(nomeAbaAlvo);
+  
+  // Lógica de Blindagem e Limpeza
+  if (sobrescrever) {
+    sheet.clear();
+    sheet.appendRow(CABECALHO);
+    sheet.getRange(1, 1, 1, 7).setFontWeight("bold").setBackground("#d9ead3").setBorder(true, true, true, true, true, true);
+  } else if (sheet.getRange(1, 1).getValue() === "") {
+    if (sheet.getLastRow() > 0) { sheet.insertRowBefore(1); }
+    sheet.getRange(1, 1, 1, 7).setValues([CABECALHO]).setFontWeight("bold").setBackground("#d9ead3").setBorder(true, true, true, true, true, true);
+  }
+
+  let listaAgendas;
+  try {
+    listaAgendas = Calendar.CalendarList.list().items;
+  } catch (e) { return; }
+
+  let dadosTemporarios = [];
+
+  listaAgendas.forEach(itemAgenda => {
+    const calendarId = itemAgenda.id;
+    const nomeResponsavel = formatarNome(itemAgenda.summaryOverride || itemAgenda.summary);
+    
+    try {
+      const eventos = Calendar.Events.list(calendarId, {
+        timeMin: dataInicio.toISOString(),
+        timeMax: dataFim.toISOString(),
+        singleEvents: true,
+        orderBy: 'startTime'
+      }).items;
+      
+      if (eventos) {
+        eventos.forEach(evento => {
+          const titulo = evento.summary || "Sem Título";
+          if (/^(Acessórias\s*\+|Acessorias\s*\+|Komunic\s*\+)/i.test(titulo)) {
+            
+            let realizado = "Sim";
+            if (evento.attendees) {
+              const self = evento.attendees.find(a => a.self);
+              if (self && self.responseStatus === "declined") realizado = "Não";
+            }
+
+            let possuiTexto = "Não", possuiVideo = "Não";
+            if (evento.attachments) {
+              evento.attachments.forEach(anexo => {
+                const n = anexo.title.toLowerCase();
+                if (n.includes("anotações do gemini")) possuiTexto = "Sim";
+                if (n.includes("recording") || (anexo.mimeType && anexo.mimeType.includes("video"))) possuiVideo = "Sim";
+              });
+            }
+            
+            const dataObjeto = new Date(evento.start.dateTime || evento.start.date);
+            dadosTemporarios.push({
+              nome: nomeResponsavel,
+              titulo: titulo,
+              dataObj: dataObjeto,
+              dataSort: Utilities.formatDate(dataObjeto, "GMT-3", "yyyy-MM-dd"),
+              dataFormatada: Utilities.formatDate(dataObjeto, "GMT-3", "dd/MM/yyyy"),
+              horaFormatada: Utilities.formatDate(dataObjeto, "GMT-3", "HH:mm"),
+              realizado: realizado, texto: possuiTexto, video: possuiVideo
+            });
+          }
+        });
+      }
+    } catch (e) { }
+  });
+
+  // Ordenação: Data > Nome > Hora
+  if (dadosTemporarios.length > 0) {
+    dadosTemporarios.sort((a, b) => {
+      if (a.dataSort !== b.dataSort) return a.dataSort.localeCompare(b.dataSort);
+      if (a.nome !== b.nome) return a.nome.localeCompare(b.nome);
+      return a.dataObj.getTime() - b.dataObj.getTime();
+    });
+
+    const rows = dadosTemporarios.map(d => [d.nome, d.titulo, d.dataFormatada, d.horaFormatada, d.realizado, d.texto, d.video]);
+    sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, 7).setValues(rows);
+    sheet.autoResizeColumns(1, 7);
+  }
+}
