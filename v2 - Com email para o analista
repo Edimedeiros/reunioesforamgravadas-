@@ -1,0 +1,200 @@
+/**
+ * CONFIGURAÇÃO GLOBAL
+ */
+const SPREADSHEET_ID = '1XoSJAZMd5h5EPtragQlk32OpUVNNCfKWxrVvHhH8XLw';
+const CABECALHO = ["Nome da agenda", "Titulo do Evento", "Data do evento na agenda", "Hora do evento", "Evento realizado?", "Anotações Gemini?", "Possui Gravação?"];
+
+/**
+ * CRIA O MENU NA PLANILHA
+ */
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('🤖 Automação')
+    .addItem('1. Forçar Teste (Aba Teste)', 'executarTesteManual')
+    .addSeparator()
+    .addItem('2. Realizar Auditoria Real (Mês Inteiro - SOBRESCREVE)', 'executarAuditoriaMensalManual')
+    .addToUi();
+}
+
+/**
+ * TRATAMENTO DE NOMES (Ex: maria.silva | Acessórias -> Maria Silva)
+ */
+function formatarNome(nomeOriginal) {
+  if (!nomeOriginal) return "Sem Nome";
+  let nome = nomeOriginal.split('|')[0].split('@')[0].trim();
+  nome = nome.replace(/\./g, ' ');
+  return nome.toLowerCase().split(' ').map(function(palavra) {
+    return palavra.charAt(0).toUpperCase() + palavra.slice(1);
+  }).join(' ');
+}
+
+/**
+ * ENVIO DE E-MAIL DIÁRIO (Individual por erro)
+ */
+function enviarEmailIndividual(destinatario, nomeAnalista, dataEvento, faltaTexto, faltaVideo) {
+  let motivo = (faltaTexto && faltaVideo) ? "não há gravação e nem as anotações do Gemini" : (faltaTexto ? "não há as anotações do Gemini" : "não há o arquivo de gravação");
+  
+  const assunto = "Pendência de Processo: Reunião " + dataEvento;
+  const corpo = "Olá " + nomeAnalista + ",\n\n" +
+                "No dia " + dataEvento + ", você realizou uma reunião onde o evento na sua agenda está marcado como realizado mas " + motivo + ".\n\n" +
+                "Gentileza verificar, pois é de suma importância que todas as reuniões sejam gravadas e as anotações marcadas para serem feitas.\n\n" +
+                "Atenciosamente,\n\n" +
+                "Liderança";
+
+  MailApp.sendEmail(destinatario, assunto, corpo);
+}
+
+/**
+ * ENVIO DE E-MAIL MENSAL (Compilado por analista)
+ */
+function enviarEmailConsolidado(destinatario, nomeAnalista, listaFalhas) {
+  const assunto = "Relatório Consolidado de Pendências - Auditoria Mensal";
+  let listaTexto = listaFalhas.map(f => "- " + f.data + " às " + f.hora + ": " + f.titulo + " (" + f.motivo + ")").join('\n');
+  
+  const corpo = "Olá " + nomeAnalista + ",\n\n" +
+                "Realizamos uma auditoria detalhada nas reuniões deste mês e identificamos que os seguintes eventos constam como realizados, mas possuem pendências de gravação ou anotações:\n\n" +
+                listaTexto + "\n\n" +
+                "Gentileza verificar e regularizar, pois é de suma importância seguir o processo de gravação e anotações.\n\n" +
+                "Atenciosamente,\n\n" +
+                "Liderança";
+
+  MailApp.sendEmail(destinatario, assunto, corpo);
+}
+
+/**
+ * FUNÇÕES DE DISPARO (MENU E GATILHOS)
+ */
+function executarTesteManual() {
+  const hoje = new Date();
+  const dataIni = new Date(hoje); dataIni.setDate(hoje.getDate() - 2); dataIni.setHours(0,0,0,0);
+  const dataFim = new Date(hoje); dataFim.setHours(23,59,59,999);
+  
+  processarAuditoria(dataIni, dataFim, "Teste", true, false, false);
+  SpreadsheetApp.getUi().alert("Teste concluído!");
+}
+
+function executarAuditoriaMensalManual() {
+  const hoje = new Date();
+  const dataIni = new Date(hoje.getFullYear(), hoje.getMonth(), 1, 0, 0, 0);
+  const meses = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+  const nomeAba = meses[hoje.getMonth()] + "_" + hoje.getFullYear();
+
+  const ui = SpreadsheetApp.getUi();
+  const resp = ui.alert('🚨 AUDITORIA MENSAL', 'Deseja refazer o mês e enviar UM ÚNICO e-mail compilado para cada analista?', ui.ButtonSet.YES_NO);
+  
+  if (resp == ui.Button.YES) {
+    processarAuditoria(dataIni, new Date(), nomeAba, true, true, true);
+    ui.alert("Auditoria mensal concluída!");
+  }
+}
+
+function realizarAuditoriaDiaria() {
+  const hoje = new Date();
+  const ontem = new Date(hoje); ontem.setDate(hoje.getDate() - 1);
+  const dataIni = new Date(ontem); dataIni.setHours(0,0,0,0);
+  const dataFim = new Date(ontem); dataFim.setHours(23,59,59,999);
+  const meses = ["Janeiro", "Fevereiro", "Março", "Abril", "Maio", "Junho", "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"];
+  const nomeAba = meses[dataIni.getMonth()] + "_" + dataIni.getFullYear();
+
+  processarAuditoria(dataIni, dataFim, nomeAba, false, true, false);
+}
+
+/**
+ * MOTOR DA AUTOMAÇÃO
+ */
+function processarAuditoria(dataInicio, dataFim, nomeAbaAlvo, sobrescrever, enviarEmails, modoConsolidado) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  let sheet = ss.getSheetByName(nomeAbaAlvo) || ss.insertSheet(nomeAbaAlvo);
+  
+  if (sobrescrever) {
+    sheet.clear();
+    sheet.appendRow(CABECALHO);
+    sheet.getRange(1, 1, 1, 7).setFontWeight("bold").setBackground("#d9ead3").setBorder(true, true, true, true, true, true);
+  } else if (sheet.getRange(1, 1).getValue() === "") {
+    if (sheet.getLastRow() > 0) sheet.insertRowBefore(1);
+    sheet.getRange(1, 1, 1, 7).setValues([CABECALHO]).setFontWeight("bold").setBackground("#d9ead3").setBorder(true, true, true, true, true, true);
+  }
+
+  let listaAgendas;
+  try { listaAgendas = Calendar.CalendarList.list().items; } catch (e) { return; }
+
+  let dadosTemporarios = [];
+  let falhasPorAnalista = {}; 
+
+  listaAgendas.forEach(function(agenda) {
+    const calendarId = agenda.id;
+    const nomeResponsavel = formatarNome(agenda.summaryOverride || agenda.summary);
+    
+    try {
+      const eventos = Calendar.Events.list(calendarId, { timeMin: dataInicio.toISOString(), timeMax: dataFim.toISOString(), singleEvents: true, orderBy: 'startTime' }).items;
+      
+      if (eventos) {
+        eventos.forEach(function(ev) {
+          const titulo = ev.summary || "Sem Título";
+          if (/^(Acessórias\s*\+|Acessorias\s*\+|Komunic\s*\+)/i.test(titulo)) {
+            
+            let realizado = "Sim";
+            if (ev.attendees && ev.attendees.find(a => a.self && a.responseStatus === "declined")) realizado = "Não";
+
+            let possuiTexto = "Não", possuiVideo = "Não";
+            if (ev.attachments) {
+              ev.attachments.forEach(function(an) {
+                const n = an.title.toLowerCase();
+                if (n.includes("anotações do gemini")) possuiTexto = "Sim";
+                if (n.includes("recording") || (an.mimeType && an.mimeType.includes("video"))) possuiVideo = "Sim";
+              });
+            }
+            
+            const dObj = new Date(ev.start.dateTime || ev.start.date);
+            const dataFmt = Utilities.formatDate(dObj, "GMT-3", "dd/MM/yyyy");
+            const horaFmt = Utilities.formatDate(dObj, "GMT-3", "HH:mm");
+
+            dadosTemporarios.push({
+              email: calendarId, nome: nomeResponsavel, titulo: titulo, dataObj: dObj, 
+              dataSort: Utilities.formatDate(dObj, "GMT-3", "yyyy-MM-dd"), dataFmt: dataFmt, horaFmt: horaFmt,
+              realizado: realizado, texto: possuiTexto, video: possuiVideo
+            });
+            
+            if (realizado === "Sim" && (possuiTexto === "Não" || possuiVideo === "Não")) {
+              if (!falhasPorAnalista[calendarId]) falhasPorAnalista[calendarId] = { nome: nomeResponsavel, lista: [] };
+              let motivo = (possuiTexto === "Não" && possuiVideo === "Não") ? "Falta vídeo e texto" : (possuiTexto === "Não" ? "Falta texto" : "Falta vídeo");
+              falhasPorAnalista[calendarId].lista.push({ data: dataFmt, hora: horaFmt, titulo: titulo, motivo: motivo });
+            }
+          }
+        });
+      }
+    } catch (e) {}
+  });
+
+  if (dadosTemporarios.length > 0) {
+    dadosTemporarios.sort(function(a, b) {
+      if (a.dataSort !== b.dataSort) return a.dataSort.localeCompare(b.dataSort);
+      if (a.nome !== b.nome) return a.nome.localeCompare(b.nome);
+      return a.dataObj.getTime() - b.dataObj.getTime();
+    });
+
+    const rows = dadosTemporarios.map(d => [d.nome, d.titulo, d.dataFmt, d.horaFmt, d.realizado, d.texto, d.video]);
+    const startRow = sheet.getLastRow() + 1;
+    sheet.getRange(startRow, 1, rows.length, 7).setValues(rows);
+
+    dadosTemporarios.forEach(function(d, i) {
+      const curRow = startRow + i;
+      const temFalha = (d.realizado === "Sim" && (d.texto === "Não" || d.video === "Não"));
+      if (temFalha) {
+        sheet.getRange(curRow, 1, 1, 7).setBackground("#f4cccc");
+        if (enviarEmails && !modoConsolidado && d.email.includes("@")) {
+          enviarEmailIndividual(d.email, d.nome, d.dataFmt, d.texto === "Não", d.video === "Não");
+        }
+      }
+    });
+    sheet.autoResizeColumns(1, 7);
+  }
+
+  if (enviarEmails && modoConsolidado) {
+    for (let email in falhasPorAnalista) {
+      if (email.includes("@")) {
+        enviarEmailConsolidado(email, falhasPorAnalista[email].nome, falhasPorAnalista[email].lista);
+      }
+    }
+  }
+}
